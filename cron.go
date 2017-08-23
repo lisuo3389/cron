@@ -14,6 +14,7 @@ type Cron struct {
 	entries  []*Entry
 	stop     chan struct{}
 	add      chan *Entry
+	del      chan int
 	snapshot chan []*Entry
 	running  bool
 	ErrorLog *log.Logger
@@ -47,6 +48,9 @@ type Entry struct {
 
 	// The Job to run.
 	Job Job
+
+	// The Job name
+	Name string
 }
 
 // byTime is a wrapper for sorting the entry array by time
@@ -78,6 +82,7 @@ func NewWithLocation(location *time.Location) *Cron {
 	return &Cron{
 		entries:  nil,
 		add:      make(chan *Entry),
+		del:      make(chan int),
 		stop:     make(chan struct{}),
 		snapshot: make(chan []*Entry),
 		running:  false,
@@ -92,25 +97,36 @@ type FuncJob func()
 func (f FuncJob) Run() { f() }
 
 // AddFunc adds a func to the Cron to be run on the given schedule.
-func (c *Cron) AddFunc(spec string, cmd func()) error {
-	return c.AddJob(spec, FuncJob(cmd))
+func (c *Cron) AddFunc(name, spec string, cmd func()) error {
+	return c.AddJob(name, spec, FuncJob(cmd))
 }
 
 // AddJob adds a Job to the Cron to be run on the given schedule.
-func (c *Cron) AddJob(spec string, cmd Job) error {
+func (c *Cron) AddJob(name, spec string, cmd Job) error {
 	schedule, err := Parse(spec)
 	if err != nil {
 		return err
 	}
-	c.Schedule(schedule, cmd)
+	c.Schedule(name, schedule, cmd)
+	return nil
+}
+
+// DelJob from Cron
+func (c *Cron) DelJob(name string) error {
+	for i, e := range c.entries {
+		if e.Name == name {
+			c.del <- i
+		}
+	}
 	return nil
 }
 
 // Schedule adds a Job to the Cron to be run on the given schedule.
-func (c *Cron) Schedule(schedule Schedule, cmd Job) {
+func (c *Cron) Schedule(name string, schedule Schedule, cmd Job) {
 	entry := &Entry{
 		Schedule: schedule,
 		Job:      cmd,
+		Name:     name,
 	}
 	if !c.running {
 		c.entries = append(c.entries, entry)
@@ -207,6 +223,10 @@ func (c *Cron) run() {
 				newEntry.Next = newEntry.Schedule.Next(now)
 				c.entries = append(c.entries, newEntry)
 
+			case index := <-c.del:
+				timer.Stop()
+				c.entries = append(c.entries[:index], c.entries[index+1:]...)
+
 			case <-c.snapshot:
 				c.snapshot <- c.entrySnapshot()
 				continue
@@ -248,6 +268,7 @@ func (c *Cron) entrySnapshot() []*Entry {
 			Next:     e.Next,
 			Prev:     e.Prev,
 			Job:      e.Job,
+			Name:     e.Name,
 		})
 	}
 	return entries
